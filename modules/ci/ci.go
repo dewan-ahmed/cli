@@ -10,4 +10,7 @@ func ModuleInit(reg registry.ModuleRegistrar) {
 	reg.RegisterWorkflow(executeAnnotationHandlerID, executeAnnotationHandler)
 	reg.RegisterWorkflow(executeErrorValidateHandlerID, executeErrorValidateHandler)
 	reg.RegisterWorkflow(executeErrorEvaluateHandlerID, executeErrorEvaluateHandler)
+	reg.RegisterWorkflow(executeCoverageAnalyzeHandlerID, executeCoverageAnalyzeHandler)
+	reg.RegisterWorkflow(executeCoverageUploadHandlerID, executeCoverageUploadHandler)
+	reg.RegisterWorkflow(executeCoverageWaitUntilHandlerID, executeCoverageWaitUntilHandler)
 }
