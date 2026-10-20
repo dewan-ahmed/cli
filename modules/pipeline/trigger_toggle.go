@@ -58,11 +58,10 @@ func toggleTrigger(ctx *cmdctx.Ctx, enabled bool) error {
 		return fmt.Errorf("trigger %s/%s: %w", pipelineID, triggerID, err)
 	}
 
-	w, closeW, err := format.OpenWriter(ctx.FormatFlags.OutFile)
+	w, err := format.OpenWriter(ctx.FormatFlags.OutFile)
 	if err != nil {
 		return err
 	}
-	defer closeW()
 
 	if !changed {
 		fmt.Fprintf(w, "Trigger %s is already %s\n", triggerID, state)
