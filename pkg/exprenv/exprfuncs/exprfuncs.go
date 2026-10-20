@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/harness/cli/v3/pkg/console"
 	"github.com/harness/cli/v3/pkg/format"
 )
@@ -427,6 +429,16 @@ func Env(name string, def ...string) string {
 		return def[0]
 	}
 	return ""
+}
+
+// YamlParse parses a YAML document string into a map. Returns nil when s is empty,
+// invalid, or not a mapping, so callers see an unresolved expression.
+func YamlParse(s string) any {
+	var out map[string]any
+	if err := yaml.Unmarshal([]byte(s), &out); err != nil || out == nil {
+		return nil
+	}
+	return out
 }
 
 // Base64Decode decodes s as standard or URL-safe base64, padded or not.
