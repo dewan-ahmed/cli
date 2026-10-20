@@ -1067,6 +1067,10 @@ commands:
     flags_builtin:
     handler_type: workflow
     workflow_id: execute_artifact_firewall_scan
+    flags:
+      - name: async
+        description: "Use the legacy asynchronous initiate-and-poll API instead of synchronous evaluation"
+        is_bool: true
 
   - command: execute registry:firewall_scan
     verb: execute
@@ -1082,6 +1086,12 @@ commands:
       - name: lockfile
         description: "Path to lock file (package-lock.json, pnpm-lock.yaml, yarn.lock, requirements.txt, pyproject.toml, Pipfile.lock, poetry.lock, pom.xml, build.gradle, packages.lock.json)"
         required: true
+      - name: async
+        description: "Use the legacy asynchronous initiate-and-poll API instead of synchronous evaluation"
+        is_bool: true
+      - name: batch-size
+        description: "Artifacts evaluated per batch (default: 20, maximum: 50)"
+        default: "20"
 
   - command: execute artifact:npm_install
     verb: execute
@@ -1287,7 +1297,7 @@ commands:
     workflow_id: configure_registry_pip
     flags:
       - name: global
-        description: "Write config to the global/user-level pip.conf instead of the local project directory"
+        description: "Write config to the user-level pip.conf (default true); --global=false writes ./pip.conf, which pip reads only via PIP_CONFIG_FILE"
         is_bool: true
 
   - command: configure registry:nuget
