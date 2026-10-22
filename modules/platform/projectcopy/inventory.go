@@ -105,7 +105,7 @@ func (a *API) list(l Location, kind string) ([]map[string]any, error) {
 			}
 		}
 		expectedPages := (total + size - 1) / size
-		if pages != expectedPages && !(total == 0 && pages == 1) {
+		if pages != expectedPages && (total != 0 || pages != 1) {
 			return nil, safeCode("pagination_incomplete")
 		}
 		for _, v := range items {

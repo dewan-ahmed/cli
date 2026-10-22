@@ -13,11 +13,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/term"
+
 	"github.com/harness/cli/v3/modules/platform/projectcopy"
 	"github.com/harness/cli/v3/pkg/client"
 	"github.com/harness/cli/v3/pkg/cmdctx"
 	"github.com/harness/cli/v3/pkg/format"
-	"golang.org/x/term"
 )
 
 func copyOptions(ctx *cmdctx.Ctx) (projectcopy.Options, error) {

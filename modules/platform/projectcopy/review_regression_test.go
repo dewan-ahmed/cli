@@ -9,8 +9,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/harness/cli/v3/pkg/client"
 	"go.yaml.in/yaml/v3"
+
+	"github.com/harness/cli/v3/pkg/client"
 )
 
 type pipelineFields struct{ root, codebase, branch, infra, step, run map[string]any }

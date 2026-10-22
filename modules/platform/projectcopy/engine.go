@@ -278,8 +278,7 @@ func (e *Engine) prepare(o Options, resources []*resource, operation string) ([]
 	}
 	var issues []Item
 	for _, r := range resources {
-		var resolve referenceFn
-		resolve = func(typed, raw string) (string, error) {
+		resolve := func(typed, raw string) (string, error) {
 			pieces := strings.SplitN(typed, ":", 2)
 			kind := pieces[0]
 			expected := ""
@@ -303,7 +302,6 @@ func (e *Engine) prepare(o Options, resources []*resource, operation string) ([]
 				if target, ok := mappings[dep.key()]; ok {
 					usedMappings[dep.key()] = true
 					ref = target
-					scope, _, _ = splitRef(ref)
 				} else {
 					if expected != "" && str(dep.Definition, "type") != expected {
 						return "", safeCode("dependency_type_mismatch")

@@ -17,10 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/harness/cli/v3/pkg/auth"
 	"github.com/harness/cli/v3/pkg/client"
 	"github.com/harness/cli/v3/pkg/hlog"
-	"go.yaml.in/yaml/v3"
 )
 
 const sensitive = "SYNTHETIC_SENSITIVE_DO_NOT_OUTPUT"
