@@ -92,16 +92,16 @@ func pipelineDefinition(t *testing.T) map[string]any {
                   spec:
                     image: public/image
                     shell: Sh
-                    command: echo synthetic
+                    command: go test ./...
                     envVariables:
                       CREDENTIAL: <+secrets.getValue("credential")>
                       INPUT: <+input>
 `
-	s = strings.Replace(s, "echo synthetic", "echo "+sensitive, 1)
 	m, e := decodeYAML(s)
 	if e != nil {
 		t.Fatal(e)
 	}
+	obj(m["pipeline"])["description"] = sensitive
 	return m
 }
 func (f *fixture) DoRaw(r client.Request) (*http.Response, error) {

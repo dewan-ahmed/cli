@@ -281,14 +281,38 @@ func decodeYAML(s string) (map[string]any, error) {
 
 var secretExpression = regexp.MustCompile(`^<\+secrets\.getValue\(["']([A-Za-z0-9_.-]+)["']\)>$`)
 var sensitiveName = regexp.MustCompile(`(?i)(password|token|secret|credential|private.?key|api.?key|authorization)`)
-var credentialAssignment = regexp.MustCompile(`(?i)(password|token|secret|credential|private[_-]?key|api[_-]?key|authorization)[\t ]*[:=]`)
+
+func supportedRunCommand(command string) bool {
+	switch command {
+	case "go test ./...", "go test -race ./...", "go build ./...", "<+input>":
+		return true
+	default:
+		return false
+	}
+}
+
+func rewriteScalars(m map[string]any, ref referenceFn, fields ...string) error {
+	for _, field := range fields {
+		if value, ok := m[field]; ok {
+			rewritten, err := scalar(value, ref, false)
+			if err != nil {
+				return err
+			}
+			m[field] = rewritten
+		}
+	}
+	return nil
+}
 
 func scalar(v any, ref referenceFn, opaque bool) (any, error) {
+	if opaque {
+		command, ok := v.(string)
+		if !ok || !supportedRunCommand(command) {
+			return nil, safeCode("unsupported_opaque_run_command")
+		}
+	}
 	switch x := v.(type) {
 	case string:
-		if opaque && credentialAssignment.MatchString(x) {
-			return nil, safeCode("inline_credentials_or_opaque_assignment")
-		}
 		if strings.Contains(x, "<+secrets.") {
 			match := secretExpression.FindStringSubmatch(x)
 			if opaque || len(match) != 2 {
@@ -359,6 +383,11 @@ func pipeline(r *resource, dest Location, operation string, ref referenceFn) err
 			if only(m, "name", "type", "value", "description", "required") != nil {
 				return safeCode("pipeline_variables")
 			}
+			if required, present := m["required"]; present {
+				if _, ok := required.(bool); !ok {
+					return safeCode("pipeline_variables")
+				}
+			}
 			if sensitiveName.MatchString(str(m, "name")) && str(m, "value") != "<+input>" && !secretExpression.MatchString(str(m, "value")) {
 				return safeCode("inline_credentials")
 			}
@@ -377,6 +406,9 @@ func pipeline(r *resource, dest Location, operation string, ref referenceFn) err
 		}
 	}
 	properties := obj(p["properties"])
+	if _, present := p["properties"]; present && properties == nil {
+		return safeCode("pipeline_properties")
+	}
 	if properties != nil {
 		if only(properties, "ci") != nil {
 			return safeCode("pipeline_properties")
@@ -394,6 +426,9 @@ func pipeline(r *resource, dest Location, operation string, ref referenceFn) err
 			return e
 		}
 		cb["connectorRef"] = v
+		if err := rewriteScalars(cb, ref, "repoName"); err != nil {
+			return err
+		}
 		b := obj(cb["build"])
 		if only(b, "type", "spec") != nil || str(b, "type") != "branch" {
 			return safeCode("pipeline_codebase")
@@ -402,8 +437,8 @@ func pipeline(r *resource, dest Location, operation string, ref referenceFn) err
 		if only(s, "branch") != nil {
 			return safeCode("pipeline_codebase")
 		}
-		if _, e = scalar(s["branch"], ref, false); e != nil {
-			return e
+		if err := rewriteScalars(s, ref, "branch"); err != nil {
+			return err
 		}
 	}
 	stages, ok := p["stages"].([]any)
@@ -440,14 +475,8 @@ func pipeline(r *resource, dest Location, operation string, ref referenceFn) err
 			return e
 		}
 		is["connectorRef"] = v
-		for _, k := range []string{"namespace", "os"} {
-			if x, ok := is[k]; ok {
-				nv, e := scalar(x, ref, false)
-				if e != nil {
-					return e
-				}
-				is[k] = nv
-			}
+		if err := rewriteScalars(is, ref, "namespace", "os", "automountServiceAccountToken"); err != nil {
+			return err
 		}
 		if n, ok := is["nodeSelector"]; ok {
 			if e := values(obj(n), ref); e != nil {
@@ -471,8 +500,14 @@ func pipeline(r *resource, dest Location, operation string, ref referenceFn) err
 			if only(step, "identifier", "name", "type", "spec", "timeout") != nil || str(step, "type") != "Run" {
 				return safeCode("pipeline_step_variant")
 			}
+			if err := rewriteScalars(step, ref, "timeout"); err != nil {
+				return err
+			}
 			rs := obj(step["spec"])
 			if only(rs, "connectorRef", "image", "shell", "command", "envVariables", "resources", "privileged", "runAsUser") != nil {
+				return safeCode("pipeline_step_schema")
+			}
+			if _, present := rs["command"]; !present {
 				return safeCode("pipeline_step_schema")
 			}
 			if raw := str(rs, "connectorRef"); raw != "" {

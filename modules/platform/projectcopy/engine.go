@@ -103,6 +103,7 @@ func (e *Engine) Run(o Options) (report Report, runErr error) {
 		if saved == nil || !projectOwned(destination, saved) {
 			return fail(report, "project", o.Destination.Project, safeCode("destination_exists_or_ownership_unproven"))
 		}
+		setStatus(&report, &resource{Kind: "project", ID: o.Destination.Project}, "created", "")
 	} else if saved != nil && saved.ProjectEvidence != "" {
 		return fail(report, "project", o.Destination.Project, safeCode("destination_missing"))
 	}
@@ -179,13 +180,9 @@ func (e *Engine) Run(o Options) (report Report, runErr error) {
 			return unknown(report, "project", o.Destination.Project)
 		}
 	}
+	setStatus(&report, &resource{Kind: "project", ID: o.Destination.Project}, "created", "")
 	if err := e.API.inlineScope(o.Destination, o.Resources); err != nil {
 		return fail(report, "git_scope", "", err)
-	}
-	for i := range report.Items {
-		if report.Items[i].Type == "project" && report.Items[i].ID == o.Destination.Project {
-			report.Items[i].Status = "created"
-		}
 	}
 	for _, r := range ordered {
 		if r.Mapped {
