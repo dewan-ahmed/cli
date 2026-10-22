@@ -21,6 +21,13 @@ help_text: |
   other resources. Delegates are agents that run in your infrastructure and execute tasks
   on behalf of Harness.
 
+  ### Partial project copy
+
+  migrate project:project requires explicit --from, --to and --resources selection
+  (secret,connector,pipeline). It creates a NEW project; it is never a full clone.
+  Start with --dry-run. See modules/platform/project-copy.md for supported variants,
+  secure shared mappings, checkpoint/resume and operational-readiness limitations.
+
   ### Nouns
 
   {{nouns}}
@@ -490,6 +497,47 @@ nouns:
         expr: epochMs(it.createdAt)
 
 commands:
+  - command: migrate project:project
+    verb: migrate
+    noun: project
+    noun_to: project
+    short: Copy selected secrets, connectors and pipelines to a NEW project (PARTIAL only)
+    long: |
+      Explicitly PARTIAL configuration copy within the same instance, account and org.
+      Both --from and --to project identifiers and a nonempty --resources selection
+      are required. No current-profile project default, overwrite, full-project clone,
+      secret value export, trigger copying, execution or Git writes.
+      Use --dry-run for a sanitized zero-mutation plan. --force skips only confirmation.
+      Apply requires --checkpoint inside an existing private (0700) directory.
+      See modules/platform/project-copy.md for supported variants, mappings and recovery.
+    migrate_from:
+      presence: required
+      label: Source project identifier (never defaults from the profile)
+    migrate_to:
+      presence: required
+      label: New destination project identifier
+    handler_type: workflow
+    workflow_id: project_copy
+    flags:
+      - name: resources
+        description: "Required comma-separated selection: secret,connector,pipeline"
+        required: true
+      - name: name
+        description: Destination project name (defaults to destination identifier)
+      - name: mappings
+        description: Strict non-secret JSON mappings to accessible existing shared references
+      - name: dry-run
+        description: Inventory and plan only; zero resource mutations, including with --force
+        is_bool: true
+      - name: force
+        description: Skip only the default-no confirmation; never bypass preflight safety
+        is_bool: true
+      - name: checkpoint
+        description: Restricted local checkpoint path in a private directory (required for apply)
+      - name: resume
+        description: Resume only operation-owned, revision-verified destination resources
+        is_bool: true
+
   - command: list organization
     verb: list
     noun: organization
