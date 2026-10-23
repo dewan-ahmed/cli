@@ -233,6 +233,27 @@ func TestConnectorInventoryRequiresExplicitProjectScope(t *testing.T) {
 	}
 }
 
+func TestExplicitInheritedConnectorIsNotProjectOwned(t *testing.T) {
+	f := newFixture(t)
+	o := options(t)
+	o.Resources = []string{"connector"}
+	f.source = map[string]map[string]any{"connector:git": {
+		"identifier": "git", "name": "git", "orgIdentifier": "org", "projectIdentifier": "", "type": "HttpHelmRepo",
+		"spec": map[string]any{"helmRepoUrl": "https://example.invalid/helm", "auth": map[string]any{"type": "Anonymous"}},
+	}}
+	report, err := engine(f).Run(o)
+	if err != nil || !report.RequestedComplete || len(f.writes) != 1 || f.writes[0] != "project" || len(f.destination) != 0 {
+		t.Fatal("explicitly inherited connector was blocked or copied as project-owned")
+	}
+	assertNoLeak(t, report)
+	for _, item := range report.Items {
+		if item.Type == "connector" && item.ID == "git" && item.Status == "inherited_not_copied" {
+			return
+		}
+	}
+	t.Fatal("inherited connector disposition missing from report")
+}
+
 func TestPostCreateGitReadFailurePreservesCreatedProjectAndResume(t *testing.T) {
 	f := newFixture(t)
 	o := options(t)
