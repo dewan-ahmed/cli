@@ -54,8 +54,12 @@ only partial observations. A complete inventory may still contain blocked items.
 - [Harness SecretText SDK schema](https://github.com/harness/harness-go-sdk/blob/2d590feb560bb8609bef3f96e73601602b13574b/harness/nextgen/model_secret_text_spec.go): `type`, `secretManagerIdentifier`, `valueType`, optional `value` and `additionalMetadata`. Only the minimal variant without additional metadata is supported here.
 
 Inventory validates all pagination metadata, counts, unique identities, source
-scope and list/detail type/revision agreement. It re-lists after details and
-rejects observed churn. This is not an atomic server snapshot or a guarantee
+scope and list/detail type/revision agreement. Present `pageIndex` and `empty`
+controls must match the requested page and content; `pageToken` must be an empty
+string because token-based continuation is not supported. Unknown page controls,
+case aliases, null controls and unsupported list-secret fields fail closed.
+Documented optional controls may be omitted, including `draft` (default false).
+It re-lists after details and rejects observed churn. This is not an atomic server snapshot or a guarantee
 against a change after the final read. Missing/restricted/inconsistent results
 are never interpreted as an empty inventory. Inventories over 100,000 items or
 responses over 4 MiB fail closed rather than being silently truncated.

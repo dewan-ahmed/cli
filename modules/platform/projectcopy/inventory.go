@@ -23,14 +23,16 @@ type secret struct {
 }
 
 func (s *secret) UnmarshalJSON(data []byte) error {
+	fields, err := canonicalObject(data, "identifier", "name", "orgIdentifier", "projectIdentifier", "type", "spec")
+	if err != nil {
+		return err
+	}
 	type plain secret
-	if err := json.Unmarshal(data, (*plain)(s)); err != nil {
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
+	*s = secret(decoded)
 	for key := range fields {
 		switch key {
 		case "identifier", "name", "orgIdentifier", "projectIdentifier", "type", "spec", "description", "tags":
@@ -47,12 +49,67 @@ type record struct {
 	Draft   bool    `json:"draft"`
 }
 
+func (r *record) UnmarshalJSON(data []byte) error {
+	if _, err := canonicalObject(data, "secret", "updatedAt", "draft"); err != nil {
+		return err
+	}
+	type plain record
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*r = record(decoded)
+	return nil
+}
+
 type pageData struct {
 	TotalPages    *int     `json:"totalPages"`
 	TotalItems    *int     `json:"totalItems"`
 	PageItemCount *int     `json:"pageItemCount"`
 	PageSize      *int     `json:"pageSize"`
 	Content       []record `json:"content"`
+	PageIndex     *int     `json:"pageIndex,omitempty"`
+	Empty         *bool    `json:"empty,omitempty"`
+	PageToken     *string  `json:"pageToken,omitempty"`
+}
+
+func (p *pageData) UnmarshalJSON(data []byte) error {
+	fields, err := canonicalObject(data, "totalPages", "totalItems", "pageItemCount", "pageSize", "content", "pageIndex", "empty", "pageToken")
+	if err != nil {
+		return err
+	}
+	for key := range fields {
+		switch key {
+		case "totalPages", "totalItems", "pageItemCount", "pageSize", "content", "pageIndex", "empty", "pageToken":
+		default:
+			return errors.New("unproven secret inventory pagination control")
+		}
+	}
+	type plain pageData
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = pageData(decoded)
+	return nil
+}
+
+type envelope[T any] struct {
+	Status string `json:"status"`
+	Data   *T     `json:"data"`
+}
+
+func (e *envelope[T]) UnmarshalJSON(data []byte) error {
+	if _, err := canonicalObject(data, "status", "data"); err != nil {
+		return err
+	}
+	type plain envelope[T]
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*e = envelope[T](decoded)
+	return nil
 }
 
 type readFn func(context.Context, Scope, string, int, any) error
@@ -77,10 +134,7 @@ func inventory(ctx context.Context, read readFn, s Scope) (Report, error) {
 	sort.Strings(ids)
 	blocked := false
 	for _, id := range ids {
-		var detail struct {
-			Status string  `json:"status"`
-			Data   *record `json:"data"`
-		}
+		var detail envelope[record]
 		if err := read(ctx, s, id, 0, &detail); err != nil {
 			return report, err
 		}
@@ -112,10 +166,7 @@ func list(ctx context.Context, read readFn, s Scope) (map[string]record, error) 
 	records := map[string]record{}
 	total, pages := -1, -1
 	for index := 0; ; index++ {
-		var response struct {
-			Status string    `json:"status"`
-			Data   *pageData `json:"data"`
-		}
+		var response envelope[pageData]
 		if err := read(ctx, s, "", index, &response); err != nil {
 			return nil, err
 		}
@@ -125,6 +176,9 @@ func list(ctx context.Context, read readFn, s Scope) (map[string]record, error) 
 		}
 		if *p.TotalItems < 0 || *p.TotalItems > 100000 || *p.TotalPages < 0 || *p.PageSize != 100 || *p.PageItemCount != len(p.Content) || len(p.Content) > 100 {
 			return nil, errors.New("secret inventory pagination invalid")
+		}
+		if (p.PageIndex != nil && *p.PageIndex != index) || (p.Empty != nil && *p.Empty != (len(p.Content) == 0)) || (p.PageToken != nil && *p.PageToken != "") {
+			return nil, errors.New("secret inventory page position or continuation inconsistent")
 		}
 		expectedPages := (*p.TotalItems + 99) / 100
 		if *p.TotalPages != expectedPages && (*p.TotalItems != 0 || *p.TotalPages != 1) {
@@ -158,7 +212,7 @@ func list(ctx context.Context, read readFn, s Scope) (map[string]record, error) 
 }
 
 func validRecord(r record, s Scope) bool {
-	return !r.Draft && r.Secret != nil && r.Updated != nil && *r.Updated >= 0 && ValidIdentifier(r.Secret.Identifier) && r.Secret.Name != "" && r.Secret.Org == s.Org && r.Secret.Project == s.Source && r.Secret.Type != "" && r.Secret.Spec != nil
+	return !r.Draft && r.Secret != nil && !r.Secret.Unproven && r.Updated != nil && *r.Updated >= 0 && ValidIdentifier(r.Secret.Identifier) && r.Secret.Name != "" && r.Secret.Org == s.Org && r.Secret.Project == s.Source && r.Secret.Type != "" && r.Secret.Spec != nil
 }
 
 func classify(s *secret) Item {
