@@ -41,6 +41,8 @@ Safe reference configuration is not a secret value. Harness uses `Reference.valu
 
 A selected category with no resources must return a valid, complete empty page—not a 403, malformed payload or failed detail. Inventory totals, page indexes/sizes/counts, duplicate ids, scopes and server revisions are checked; changing/truncated inventories block. Resource definitions are normalized by finite writable schemas, not replayed wholesale.
 
+Connector list entries must explicitly identify project scope. Missing, null, non-string or conflicting project identifiers block before creation rather than being counted as inherited resources.
+
 ## Secure prerequisites and mappings
 
 **Provision secrets and omitted dependencies separately; this workflow neither accepts credentials nor creates extra categories.**
@@ -64,6 +66,7 @@ A selected category with no resources must return a valid, complete empty page�
 - Every report says `mode: PARTIAL`, lists selected categories and unassessed exclusions, separates `requested_scope_complete` from `operational_readiness`, and reports per-resource planned/created/reused/blocked/unknown/not-attempted states. A clean dry-run exits zero but has not applied the request (`requested_scope_complete: false`).
 - Any failed/incomplete requested scope exits nonzero. A blocker stops all creation before the project exists; an apply failure stops subsequent resources and accurately retains already-created evidence. No automatic rollback/delete is attempted.
 - `--checkpoint` and its `.key` sidecar belong in the existing private 0700 directory. Files are 0600, local state updates are atomic and synchronized. The independent random integrity key is **not** a Harness credential. Protect both files; do not share them as reports.
+- Report output must not alias mappings, the checkpoint or its key, including hardlinks and symlinked parents. Report/protected parent directories must exist; dangling or unverifiable paths are rejected before inventory.
 - Checkpoints contain operation/location/resource ids, source/server revisions, statuses and ownership evidence only—no definitions, YAML, scripts, descriptions, secret/provider locators or payload-derived hashes.
 - Resume with the same locations, selection and mappings plus `--resume --checkpoint ./copy-state/operation.json`; omit `--name` because existing container metadata is not reapplied. Source inventory/revisions, destination operation tags and recorded server creation/revision evidence are rechecked. Existing identifiers alone never establish ownership; unrelated or modified resources block.
 - Read-only transient failures have bounded retries honoring bounded Retry-After. Creates are never blindly retried. Before a write, a durable pending marker is saved; a lost/ambiguous response or missing evidence preserves **unknown** and blocks automatic resume/adoption.

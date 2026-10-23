@@ -6,6 +6,7 @@ package projectcopy
 import (
 	"bytes"
 	"errors"
+	"net/http"
 	"os"
 	"testing"
 
@@ -176,6 +177,62 @@ func TestSharedSecretScalarRewritesReachFinalSerializedRequest(t *testing.T) {
 	}
 	assertNoLeak(t, report)
 }
+func TestConnectorInventoryRequiresExplicitProjectScope(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		scope   any
+		missing bool
+		blocked bool
+	}{
+		{"valid", "src", false, false},
+		{"missing", nil, true, true},
+		{"null", nil, false, true},
+		{"boolean", false, false, true},
+		{"number", 1, false, true},
+		{"other-project", "other", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			o := options(t)
+			o.Resources = []string{"connector"}
+			f.source = map[string]map[string]any{"connector:git": {
+				"identifier": "git", "name": "git", "orgIdentifier": "org", "projectIdentifier": "src", "type": "HttpHelmRepo",
+				"spec": map[string]any{"helmRepoUrl": "https://example.invalid/helm", "auth": map[string]any{"type": "Anonymous"}},
+			}}
+			e := engine(f)
+			e.API.Raw = rawFn(func(req client.Request) (*http.Response, error) {
+				if req.Path == "/ng/api/connectors/listV2" && req.QueryParams["projectIdentifier"] == "src" {
+					row := make(map[string]any)
+					for key, value := range f.source["connector:git"] {
+						row[key] = value
+					}
+					if tc.missing {
+						delete(row, "projectIdentifier")
+					} else {
+						row["projectIdentifier"] = tc.scope
+					}
+					return success(map[string]any{"content": []any{map[string]any{"connector": row}}, "totalItems": 1, "totalPages": 1, "pageItemCount": 1, "pageSize": 100, "pageIndex": 0}), nil
+				}
+				return f.DoRaw(req)
+			})
+			report, err := e.Run(o)
+			if tc.blocked {
+				if err == nil || report.RequestedComplete || len(f.writes) != 0 {
+					t.Fatal("unknown or inconsistent connector scope allowed creation or completion")
+				}
+				for _, path := range []string{o.Checkpoint, o.Checkpoint + ".key"} {
+					if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+						t.Fatal("blocked inventory persisted checkpoint state")
+					}
+				}
+			} else if err != nil || !report.RequestedComplete || len(f.writes) != 2 || len(f.destination) != 1 {
+				t.Fatal("valid project connector did not copy alongside its project")
+			}
+			assertNoLeak(t, report)
+		})
+	}
+}
+
 func TestPostCreateGitReadFailurePreservesCreatedProjectAndResume(t *testing.T) {
 	f := newFixture(t)
 	o := options(t)

@@ -162,11 +162,105 @@ func TestSensitiveOutputSurfacesUseSafeTransport(t *testing.T) {
 	}
 }
 
-func TestOutputCannotOverwriteCheckpoint(t *testing.T) {
-	ctx := copyContext()
-	ctx.FlagValues["checkpoint"] = "state.json"
-	ctx.FormatFlags.OutFile = "state.json"
-	if _, err := copyOptions(ctx); err == nil {
-		t.Fatal("checkpoint output collision accepted")
+func TestOutputCannotOverwriteProtectedFiles(t *testing.T) {
+	type testCase struct{ protected, alias string }
+	var cases []testCase
+	for _, protected := range []string{"checkpoint", "key", "mappings"} {
+		for _, alias := range []string{"direct", "symlink", "hardlink", "parent-symlink", "missing-parent-symlink", "missing-parent-dotdot", "dangling-symlink"} {
+			cases = append(cases, testCase{protected, alias})
+		}
+	}
+	cases = append(cases, testCase{"checkpoint", "unrelated"})
+	for _, tc := range cases {
+		t.Run(tc.protected+"/"+tc.alias, func(t *testing.T) {
+			dir := t.TempDir()
+			private := filepath.Join(dir, "private")
+			if err := os.Mkdir(private, 0700); err != nil {
+				t.Fatal("fixture directory failed")
+			}
+			paths := map[string]string{"checkpoint": filepath.Join(private, "state.json"), "key": filepath.Join(private, "state.json.key"), "mappings": filepath.Join(private, "mappings.json")}
+			original := []byte(`{"version":1,"mappings":[]}`)
+			missing := strings.HasPrefix(tc.alias, "missing-") || tc.alias == "dangling-symlink"
+			for kind, path := range paths {
+				if missing && kind == tc.protected {
+					continue
+				}
+				if err := os.WriteFile(path, original, 0600); err != nil {
+					t.Fatal("fixture write failed")
+				}
+			}
+			target := paths[tc.protected]
+			output := filepath.Join(dir, "report.json")
+			switch tc.alias {
+			case "direct":
+				output = target
+			case "symlink", "dangling-symlink":
+				if err := os.Symlink(target, output); err != nil {
+					t.Fatal("fixture symlink failed")
+				}
+			case "hardlink":
+				if err := os.Link(target, output); err != nil {
+					t.Fatal("fixture hardlink failed")
+				}
+			case "parent-symlink", "missing-parent-symlink", "missing-parent-dotdot":
+				alias := filepath.Join(dir, "alias")
+				parent := private
+				if tc.alias == "missing-parent-dotdot" {
+					parent = filepath.Join(private, "nested")
+					if err := os.Mkdir(parent, 0700); err != nil {
+						t.Fatal("fixture nested directory failed")
+					}
+				}
+				if err := os.Symlink(parent, alias); err != nil {
+					t.Fatal("fixture parent alias failed")
+				}
+				output = filepath.Join(alias, filepath.Base(target))
+				if tc.alias == "missing-parent-dotdot" {
+					output = alias + string(os.PathSeparator) + ".." + string(os.PathSeparator) + filepath.Base(target)
+				}
+			}
+			ctx := copyContext()
+			ctx.Context = context.Background()
+			ctx.FlagValues["checkpoint"] = paths["checkpoint"]
+			ctx.FlagValues["mappings"] = paths["mappings"]
+			ctx.FormatFlags.OutFile = output
+			ctx.FormatFlags.Format = "json"
+			old := http.DefaultTransport
+			calls := 0
+			http.DefaultTransport = copyRoundTripper(func(*http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: 403, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(nil))}, nil
+			})
+			t.Cleanup(func() { http.DefaultTransport = old; _ = format.CloseWriters() })
+			err := copyProject(ctx)
+			_ = format.CloseWriters()
+			if err == nil {
+				t.Fatal("expected a collision or injected permission failure")
+			}
+			if tc.alias == "unrelated" {
+				report, readErr := os.ReadFile(output)
+				if calls != 1 || readErr != nil || !json.Valid(report) {
+					t.Fatal("unrelated output did not receive the sanitized failure report")
+				}
+			} else {
+				want := "report output must not overwrite mappings or checkpoint state"
+				if tc.alias == "dangling-symlink" {
+					want = "report output paths could not be verified"
+				}
+				if calls != 0 || err.Error() != want {
+					t.Fatal("output alias was not rejected before inventory")
+				}
+			}
+			for kind, path := range paths {
+				current, readErr := os.ReadFile(path)
+				if missing && kind == tc.protected {
+					if !os.IsNotExist(readErr) {
+						t.Fatal("output created an absent protected file")
+					}
+				} else if readErr != nil || !bytes.Equal(current, original) {
+					t.Fatal("output changed a protected file")
+				}
+			}
+		})
 	}
 }

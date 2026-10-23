@@ -42,16 +42,12 @@ func copyOptions(ctx *cmdctx.Ctx) (projectcopy.Options, error) {
 	a := ctx.Auth
 	o = projectcopy.Options{Source: projectcopy.Location{Instance: a.APIUrl, Account: a.AccountID, Org: a.OrgID, Project: ctx.MigrateFrom}, Destination: projectcopy.Location{Instance: a.APIUrl, Account: a.AccountID, Org: a.OrgID, Project: ctx.MigrateTo}, Resources: resources, Name: cmdctx.GetString(ctx.FlagValues, "name"), DryRun: cmdctx.GetBool(ctx.FlagValues, "dry-run"), Force: cmdctx.GetBool(ctx.FlagValues, "force"), Resume: cmdctx.GetBool(ctx.FlagValues, "resume"), Checkpoint: cmdctx.GetString(ctx.FlagValues, "checkpoint")}
 	mapping := cmdctx.GetString(ctx.FlagValues, "mappings")
-	if out := ctx.FormatFlags.OutFile; out != "" {
-		abs, _ := filepath.Abs(out)
-		for _, p := range []string{o.Checkpoint, o.Checkpoint + ".key", mapping} {
-			if p != "" {
-				target, _ := filepath.Abs(p)
-				if abs == target {
-					return o, errors.New("report output must not overwrite mappings or checkpoint state")
-				}
-			}
-		}
+	protected := []string{mapping}
+	if o.Checkpoint != "" {
+		protected = append(protected, o.Checkpoint, o.Checkpoint+".key")
+	}
+	if err := validateCopyOutput(ctx.FormatFlags.OutFile, protected); err != nil {
+		return o, err
 	}
 	if mapping != "" {
 		o.Mappings, err = projectcopy.ReadMappings(mapping)
@@ -60,6 +56,64 @@ func copyOptions(ctx *cmdctx.Ctx) (projectcopy.Options, error) {
 		}
 	}
 	return o, o.Validate()
+}
+
+func validateCopyOutput(output string, protected []string) error {
+	if output == "" {
+		return nil
+	}
+	name, info, err := copyPathIdentity(output)
+	if err != nil {
+		return errors.New("report output paths could not be verified")
+	}
+	for _, path := range protected {
+		if path == "" {
+			continue
+		}
+		target, targetInfo, err := copyPathIdentity(path)
+		if err != nil {
+			return errors.New("report output paths could not be verified")
+		}
+		if name == target || (info != nil && targetInfo != nil && os.SameFile(info, targetInfo)) {
+			return errors.New("report output must not overwrite mappings or checkpoint state")
+		}
+	}
+	return nil
+}
+
+func copyPathIdentity(path string) (string, os.FileInfo, error) {
+	info, err := os.Stat(path)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return "", nil, errors.New("nonregular path")
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", nil, err
+		}
+		name, err := filepath.Abs(resolved)
+		return name, info, err
+	}
+	if !os.IsNotExist(err) {
+		return "", nil, err
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		return "", nil, errors.New("unresolved path")
+	}
+	parent, base := filepath.Split(path)
+	if parent == "" {
+		parent = "."
+	}
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", nil, err
+	}
+	dir, err := os.Stat(resolved)
+	if err != nil || !dir.IsDir() {
+		return "", nil, errors.New("unresolved parent directory")
+	}
+	name, err := filepath.Abs(filepath.Join(resolved, base))
+	return name, nil, err
 }
 
 func copyProject(ctx *cmdctx.Ctx) error {

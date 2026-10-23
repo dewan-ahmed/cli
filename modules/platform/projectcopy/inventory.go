@@ -249,10 +249,17 @@ func (a *API) inventory(l Location, kinds []string) ([]*resource, []Item) {
 				entity = obj(row[kind])
 			}
 			id := str(entity, "identifier")
-			if kind == "connector" && str(entity, "projectIdentifier") == "" {
-				// Inherited resources are dependencies, never destination-owned creations.
-				failures = append(failures, Item{Type: kind, ID: id, Status: "inherited_not_copied"})
-				continue
+			if kind == "connector" {
+				projectID, known := entity["projectIdentifier"].(string)
+				if !known || (projectID != "" && projectID != l.Project) {
+					failures = append(failures, Item{Type: kind, ID: id, Status: "blocked", Code: "resource_scope"})
+					continue
+				}
+				if projectID == "" {
+					// Inherited resources are dependencies, never destination-owned creations.
+					failures = append(failures, Item{Type: kind, ID: id, Status: "inherited_not_copied"})
+					continue
+				}
 			}
 			r, e := a.detail(l, kind, id, row)
 			if e != nil {
