@@ -305,8 +305,12 @@ func jsonStructure(data []byte, object, dataObject string) error {
 		default:
 			return &decodeFault{}
 		}
+		closing := json.Delim(']')
+		if delim == '{' {
+			closing = '}'
+		}
 		end, e := dec.Token()
-		if e != nil || !((delim == '{' && end == json.Delim('}')) || (delim == '[' && end == json.Delim(']'))) {
+		if e != nil || end != closing {
 			return &decodeFault{}
 		}
 		return nil
