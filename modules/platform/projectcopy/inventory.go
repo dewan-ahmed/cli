@@ -127,7 +127,7 @@ func list(ctx context.Context, read readFn, s Scope) (map[string]record, error) 
 			return nil, errors.New("secret inventory pagination invalid")
 		}
 		expectedPages := (*p.TotalItems + 99) / 100
-		if *p.TotalPages != expectedPages && !(*p.TotalItems == 0 && *p.TotalPages == 1) {
+		if *p.TotalPages != expectedPages && (*p.TotalItems != 0 || *p.TotalPages != 1) {
 			return nil, errors.New("secret inventory page totals inconsistent")
 		}
 		if index == 0 {
