@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -525,6 +526,138 @@ func TestInventoryDoesNotEraseUnknownListSchema(t *testing.T) {
 				t.Fatal("unknown list schema erased by minimal detail")
 			}
 		})
+	}
+}
+
+func TestDecodeFaultOperationStages(t *testing.T) {
+	for i, operation := range []string{"initial-list", "detail", "consistency-relist"} {
+		t.Run(operation, func(t *testing.T) {
+			calls := 0
+			tr := fakeTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if calls == i+1 {
+					return response(200, `{"status":null,"message":"`+marker+`"}`), nil
+				}
+				id := ""
+				if r.Method == http.MethodGet {
+					id = "secret_000"
+				}
+				var value any
+				if err := fixtureReader(1, nil)(r.Context(), testScope, id, 0, &value); err != nil {
+					t.Fatal(err)
+				}
+				data, _ := json.Marshal(value)
+				return response(200, string(data)), nil
+			})
+			r, err := Inventory(context.Background(), tr, testScope)
+			want := "malformed secret inventory response (operation=" + operation + " reason=canonical-null path=envelope.status kind=null)"
+			if err == nil || err.Error() != want || calls != i+1 || r.InventoryComplete || r.ApplyAvailable {
+				t.Fatalf("calls=%d complete=%v error=%v", calls, r.InventoryComplete, err)
+			}
+			observations := 0
+			if i == 2 {
+				observations = 1
+			}
+			data, _ := json.Marshal(r)
+			if len(r.Secrets) != observations || bytes.Contains(data, []byte(marker)) {
+				t.Fatal("failed read changed partial safe observations")
+			}
+		})
+	}
+}
+
+func TestDecodeFaultReasonsAndCanonicalPaths(t *testing.T) {
+	var value any
+	if err := fixtureReader(1, nil)(context.Background(), testScope, "", 0, &value); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(value)
+	base := string(data)
+	patch := func(from, to string) string {
+		t.Helper()
+		if !strings.Contains(base, from) {
+			t.Fatal("missing fixture replacement")
+		}
+		return strings.Replace(base, from, to, 1)
+	}
+	logPath := filepath.Join(t.TempDir(), "diagnostics.log")
+	hlog.SetDebugFile(logPath)
+	const authMarker = "SYNTHETIC_AUTH_DIAGNOSTIC_MARKER"
+	for _, tc := range []struct {
+		name, body, reason, path, kind string
+		detail                         bool
+	}{
+		{"invalid JSON", `{"message":"` + marker, "invalid-json", "unknown", "unknown", false},
+		{"known duplicate", patch(`"status":"SUCCESS"`, `"status":"SUCCESS","status":"`+marker+`"`), "duplicate-key", "envelope.status", "unknown", false},
+		{"unknown duplicate", `{"` + marker + `":0,"` + marker + `":"` + authMarker + `"}`, "duplicate-key", "unknown", "unknown", false},
+		{"nested unknown duplicate", `{"` + marker + `":{"status":0,"status":1}}`, "duplicate-key", "unknown", "unknown", false},
+		{"record duplicate", patch(`"updatedAt":17`, `"updatedAt":17,"updatedAt":0`), "duplicate-key", "record.updatedAt", "unknown", false},
+		{"secret duplicate", patch(`"identifier":"secret_000"`, `"identifier":"secret_000","identifier":"`+marker+`"`), "duplicate-key", "secret.identifier", "unknown", false},
+		{"status alias", patch(`"status":"SUCCESS"`, `"Status":"`+marker+`"`), "canonical-alias", "envelope.status", "unknown", false},
+		{"page alias", patch(`"pageSize":100`, `"PageSize":100`), "canonical-alias", "page.pageSize", "unknown", false},
+		{"record alias", patch(`"draft":false`, `"DRAFT":false`), "canonical-alias", "record.draft", "unknown", false},
+		{"secret alias", patch(`"identifier":`, `"Identifier":`), "canonical-alias", "secret.identifier", "unknown", false},
+		{"null status", patch(`"status":"SUCCESS"`, `"status":null`), "canonical-null", "envelope.status", "null", false},
+		{"null page", patch(`"pageSize":100`, `"pageSize":null`), "canonical-null", "page.pageSize", "null", false},
+		{"null record", patch(`"draft":false`, `"draft":null`), "canonical-null", "record.draft", "null", false},
+		{"status array", patch(`"status":"SUCCESS"`, `"status":[]`), "known-field-kind-mismatch", "envelope.status", "array", false},
+		{"page string", patch(`"pageSize":100`, `"pageSize":"`+marker+`"`), "known-field-kind-mismatch", "page.pageSize", "string", false},
+		{"page boolean", patch(`"pageSize":100`, `"pageSize":false`), "known-field-kind-mismatch", "page.pageSize", "boolean", false},
+		{"revision string", patch(`"updatedAt":17`, `"updatedAt":"`+marker+`"`), "known-field-kind-mismatch", "record.updatedAt", "string", false},
+		{"revision fractional number", patch(`"updatedAt":17`, `"updatedAt":1.5`), "known-field-kind-mismatch", "record.updatedAt", "number", false},
+		{"secret identifier object", patch(`"identifier":"secret_000"`, `"identifier":{"`+marker+`":true}`), "known-field-kind-mismatch", "secret.identifier", "object", false},
+		{"envelope array", `[]`, "object-kind-mismatch", "envelope", "array", false},
+		{"page array", `{"status":"SUCCESS","data":[]}`, "object-kind-mismatch", "page", "array", false},
+		{"record array", `{"status":"SUCCESS","data":[]}`, "object-kind-mismatch", "record", "array", true},
+		{"secret array", `{"status":"SUCCESS","data":{"secret":[]}}`, "object-kind-mismatch", "secret", "array", true},
+		{"unknown page control", patch(`"pageSize":100`, `"pageSize":100,"`+marker+`":"`+authMarker+`"`), "unsupported-pagination-control", "unknown", "unknown", false},
+		{"token decoder overflow", `{"` + marker + `":1e1000}`, "unknown", "unknown", "unknown", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			tr := fakeTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.Header.Get("x-api-key") != authMarker {
+					t.Fatal("synthetic authentication not exercised")
+				}
+				return response(200, tc.body), nil
+			})
+			tr.auth.PATToken = authMarker
+			tr.auth.APIUrl = "https://diagnostic.invalid/" + marker
+			var target any = &envelope[pageData]{}
+			if tc.detail {
+				target = &envelope[record]{}
+			}
+			err := tr.read(context.Background(), testScope, "", 0, target)
+			want := "malformed secret inventory response (operation=unknown reason=" + tc.reason + " path=" + tc.path + " kind=" + tc.kind + ")"
+			if err == nil || err.Error() != want || calls != 1 {
+				t.Fatalf("calls=%d error=%v; want %s", calls, err, want)
+			}
+		})
+	}
+	debug, err := os.ReadFile(logPath)
+	if err != nil || bytes.Contains(debug, []byte(marker)) || bytes.Contains(debug, []byte(authMarker)) {
+		t.Fatal("unsafe debug diagnostics")
+	}
+}
+
+func TestDecodeFaultUnknownErrorsAndLabelsAreClosed(t *testing.T) {
+	for _, err := range []error{
+		errors.New(marker),
+		fmt.Errorf("%s: %w", marker, &json.UnmarshalTypeError{Field: marker, Value: marker, Type: reflect.TypeFor[string]()}),
+		&decodeFault{operation: marker, reason: marker, path: marker, kind: marker},
+		&decodeFault{path: "page." + marker},
+	} {
+		got := atOperation(decodeError(err, "page", nil), marker)
+		want := "malformed secret inventory response (operation=unknown reason=unknown path=unknown kind=unknown)"
+		if got.Error() != want {
+			t.Fatalf("unrecognized error escaped: %v", got)
+		}
+	}
+	underlying := &json.UnmarshalTypeError{Field: "pageSize", Value: marker, Type: reflect.TypeFor[int]()}
+	err := decodeError(fmt.Errorf("%s: %w", marker, underlying), "page", map[string]json.RawMessage{"pageSize": json.RawMessage(`"` + marker + `"`)})
+	if err.Error() != "malformed secret inventory response (operation=unknown reason=known-field-kind-mismatch path=page.pageSize kind=string)" {
+		t.Fatalf("raw typed error influenced diagnostics: %v", err)
 	}
 }
 

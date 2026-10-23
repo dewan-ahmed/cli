@@ -47,6 +47,12 @@ mappings, blocked variants, denied reads or incomplete inventories exit nonzero.
 A failed inventory report has `inventory_complete: false`; earlier entries are
 only partial observations. A complete inventory may still contain blocked items.
 
+Malformed-response errors identify `initial-list`, `detail`, or
+`consistency-relist` using fixed reason codes, allowlisted schema object/field
+paths, and JSON-kind labels. Unknown context is `unknown`; received keys,
+values, parser messages, request/auth data and response bodies are never shown.
+These diagnostics do not establish API compatibility or resolve a failed read.
+
 ## Public contracts and offline validation
 
 - [List API](https://apidocs.harness.io/secrets/listsecretsv4): read-only `POST /ng/api/v2/secrets/list/secrets`, `filterType: Secret`, scoped account/org/project, zero-based `pageIndex`, maximum `pageSize: 100`, response `totalItems`, `totalPages`, `pageItemCount`, `pageSize`, `content[].secret` and `updatedAt`.

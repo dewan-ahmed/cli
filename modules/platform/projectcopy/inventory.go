@@ -23,14 +23,14 @@ type secret struct {
 }
 
 func (s *secret) UnmarshalJSON(data []byte) error {
-	fields, err := canonicalObject(data, "identifier", "name", "orgIdentifier", "projectIdentifier", "type", "spec")
+	fields, err := canonicalObject(data, "secret")
 	if err != nil {
 		return err
 	}
 	type plain secret
 	var decoded plain
 	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
+		return decodeError(err, "secret", fields)
 	}
 	*s = secret(decoded)
 	for key := range fields {
@@ -50,13 +50,14 @@ type record struct {
 }
 
 func (r *record) UnmarshalJSON(data []byte) error {
-	if _, err := canonicalObject(data, "secret", "updatedAt", "draft"); err != nil {
+	fields, err := canonicalObject(data, "record")
+	if err != nil {
 		return err
 	}
 	type plain record
 	var decoded plain
 	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
+		return decodeError(err, "record", fields)
 	}
 	*r = record(decoded)
 	return nil
@@ -74,7 +75,7 @@ type pageData struct {
 }
 
 func (p *pageData) UnmarshalJSON(data []byte) error {
-	fields, err := canonicalObject(data, "totalPages", "totalItems", "pageItemCount", "pageSize", "content", "pageIndex", "empty", "pageToken")
+	fields, err := canonicalObject(data, "page")
 	if err != nil {
 		return err
 	}
@@ -82,13 +83,13 @@ func (p *pageData) UnmarshalJSON(data []byte) error {
 		switch key {
 		case "totalPages", "totalItems", "pageItemCount", "pageSize", "content", "pageIndex", "empty", "pageToken":
 		default:
-			return errors.New("unproven secret inventory pagination control")
+			return &decodeFault{reason: "unsupported-pagination-control"}
 		}
 	}
 	type plain pageData
 	var decoded plain
 	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
+		return decodeError(err, "page", fields)
 	}
 	*p = pageData(decoded)
 	return nil
@@ -100,13 +101,14 @@ type envelope[T any] struct {
 }
 
 func (e *envelope[T]) UnmarshalJSON(data []byte) error {
-	if _, err := canonicalObject(data, "status", "data"); err != nil {
+	fields, err := canonicalObject(data, "envelope")
+	if err != nil {
 		return err
 	}
 	type plain envelope[T]
 	var decoded plain
 	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
+		return decodeError(err, "envelope", fields)
 	}
 	*e = envelope[T](decoded)
 	return nil
@@ -125,7 +127,7 @@ func inventory(ctx context.Context, read readFn, s Scope) (Report, error) {
 	}
 	records, err := list(ctx, read, s)
 	if err != nil {
-		return report, err
+		return report, atOperation(err, "initial-list")
 	}
 	ids := make([]string, 0, len(records))
 	for id := range records {
@@ -136,7 +138,7 @@ func inventory(ctx context.Context, read readFn, s Scope) (Report, error) {
 	for _, id := range ids {
 		var detail envelope[record]
 		if err := read(ctx, s, id, 0, &detail); err != nil {
-			return report, err
+			return report, atOperation(err, "detail")
 		}
 		before := records[id]
 		if detail.Status != "SUCCESS" || detail.Data == nil || !validRecord(*detail.Data, s) || detail.Data.Secret.Identifier != id || detail.Data.Secret.Type != before.Secret.Type || *detail.Data.Updated != *before.Updated {
@@ -150,7 +152,7 @@ func inventory(ctx context.Context, read readFn, s Scope) (Report, error) {
 	// Re-list to detect page churn during detail reads; this is not a server snapshot.
 	after, err := list(ctx, read, s)
 	if err != nil {
-		return report, err
+		return report, atOperation(err, "consistency-relist")
 	}
 	if !reflect.DeepEqual(records, after) {
 		return report, errors.New("secret inventory changed during planning; retry")

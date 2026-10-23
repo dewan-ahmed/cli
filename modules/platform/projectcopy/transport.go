@@ -4,6 +4,7 @@
 package projectcopy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -111,40 +112,158 @@ func (t *Transport) read(ctx context.Context, scope Scope, id string, page int, 
 		if err != nil || len(data) > responseLimit {
 			return errors.New("secret inventory response incomplete or too large")
 		}
-		if !json.Valid(data) || !unambiguousJSON(data) || json.Unmarshal(data, target) != nil {
-			return errors.New("malformed secret inventory response")
+		dataObject := "unknown"
+		switch target.(type) {
+		case *envelope[pageData]:
+			dataObject = "page"
+		case *envelope[record]:
+			dataObject = "record"
+		}
+		if err := jsonStructure(data, "envelope", dataObject); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, target); err != nil {
+			return decodeError(err, "unknown", nil)
 		}
 		return nil
 	}
 	return errors.New("secret inventory retries exhausted")
 }
 
-func canonicalObject(data []byte, controls ...string) (map[string]json.RawMessage, error) {
-	var fields map[string]json.RawMessage
-	if !unambiguousJSON(data) || json.Unmarshal(data, &fields) != nil || fields == nil {
-		return nil, errors.New("malformed secret inventory object")
+type decodeFault struct {
+	operation, reason, path, kind string
+}
+
+func (f *decodeFault) Error() string {
+	return "malformed secret inventory response (operation=" + closedLabel(f.operation, "initial-list", "detail", "consistency-relist") +
+		" reason=" + closedLabel(f.reason, "invalid-json", "duplicate-key", "canonical-alias", "canonical-null", "known-field-kind-mismatch", "object-kind-mismatch", "unsupported-pagination-control") +
+		" path=" + diagnosticPath(f.path) + " kind=" + closedLabel(f.kind, "object", "array", "string", "number", "boolean", "null") + ")"
+}
+
+func closedLabel(value string, labels ...string) string {
+	for _, label := range labels {
+		if value == label {
+			return label
+		}
 	}
-	for key, value := range fields {
-		for _, control := range controls {
-			if strings.EqualFold(key, control) && (key != control || string(value) == "null") {
-				return nil, errors.New("ambiguous or null secret inventory control")
+	return "unknown"
+}
+
+func schemaFields(object string) []string {
+	switch object {
+	case "envelope":
+		return []string{"status", "data"}
+	case "page":
+		return []string{"totalPages", "totalItems", "pageItemCount", "pageSize", "content", "pageIndex", "empty", "pageToken"}
+	case "record":
+		return []string{"secret", "updatedAt", "draft"}
+	case "secret":
+		return []string{"identifier", "name", "orgIdentifier", "projectIdentifier", "type", "spec"}
+	}
+	return nil
+}
+
+func fieldPath(object, key string) string {
+	for _, field := range schemaFields(object) {
+		if key == field {
+			return closedLabel(object, "envelope", "page", "record", "secret") + "." + field
+		}
+	}
+	return "unknown"
+}
+
+func diagnosticPath(path string) string {
+	if object := closedLabel(path, "envelope", "page", "record", "secret"); object != "unknown" {
+		return object
+	}
+	object, key, _ := strings.Cut(path, ".")
+	return fieldPath(object, key)
+}
+
+func jsonKind(data []byte) string {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return "unknown"
+	}
+	switch data[0] {
+	case '{':
+		return "object"
+	case '[':
+		return "array"
+	case '"':
+		return "string"
+	case 't', 'f':
+		return "boolean"
+	case 'n':
+		return "null"
+	default:
+		if data[0] == '-' || (data[0] >= '0' && data[0] <= '9') {
+			return "number"
+		}
+	}
+	return "unknown"
+}
+
+// Parser error fields may contain payload; never format or retain the original error.
+func decodeError(err error, object string, fields map[string]json.RawMessage) error {
+	var fault *decodeFault
+	if errors.As(err, &fault) {
+		return fault
+	}
+	var mismatch *json.UnmarshalTypeError
+	if errors.As(err, &mismatch) {
+		if path := fieldPath(object, mismatch.Field); path != "unknown" {
+			return &decodeFault{reason: "known-field-kind-mismatch", path: path, kind: jsonKind(fields[mismatch.Field])}
+		}
+	}
+	return &decodeFault{}
+}
+
+func atOperation(err error, operation string) error {
+	var fault *decodeFault
+	if errors.As(err, &fault) {
+		localized := *fault
+		localized.operation = closedLabel(operation, "initial-list", "detail", "consistency-relist")
+		return &localized
+	}
+	return err
+}
+
+func canonicalObject(data []byte, object string) (map[string]json.RawMessage, error) {
+	if err := jsonStructure(data, object, "unknown"); err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || fields == nil {
+		return nil, &decodeFault{reason: "object-kind-mismatch", path: object, kind: jsonKind(data)}
+	}
+	for _, control := range schemaFields(object) {
+		for key := range fields {
+			if key != control && strings.EqualFold(key, control) {
+				return nil, &decodeFault{reason: "canonical-alias", path: fieldPath(object, control)}
 			}
+		}
+		if string(fields[control]) == "null" {
+			return nil, &decodeFault{reason: "canonical-null", path: fieldPath(object, control), kind: "null"}
 		}
 	}
 	return fields, nil
 }
 
-func unambiguousJSON(data []byte) bool {
-	dec := json.NewDecoder(strings.NewReader(string(data)))
-	var value func() bool
-	value = func() bool {
+func jsonStructure(data []byte, object, dataObject string) error {
+	if !json.Valid(data) {
+		return &decodeFault{reason: "invalid-json"}
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var value func(string, string) error
+	value = func(path, object string) error {
 		token, err := dec.Token()
 		if err != nil {
-			return false
+			return &decodeFault{}
 		}
 		delim, ok := token.(json.Delim)
 		if !ok {
-			return true
+			return nil
 		}
 		switch delim {
 		case '{':
@@ -152,32 +271,51 @@ func unambiguousJSON(data []byte) bool {
 			for dec.More() {
 				key, e := dec.Token()
 				if e != nil {
-					return false
+					return &decodeFault{}
 				}
 				s, ok := key.(string)
-				if !ok || seen[s] {
-					return false
+				if !ok {
+					return &decodeFault{}
+				}
+				if seen[s] {
+					return &decodeFault{reason: "duplicate-key", path: fieldPath(object, s)}
 				}
 				seen[s] = true
-				if !value() {
-					return false
+				child := "unknown"
+				switch {
+				case object == "envelope" && s == "data":
+					child = dataObject
+				case object == "record" && s == "secret":
+					child = "secret"
+				}
+				if err := value(fieldPath(object, s), child); err != nil {
+					return err
 				}
 			}
 		case '[':
+			child := "unknown"
+			if path == "page.content" {
+				child = "record"
+			}
 			for dec.More() {
-				if !value() {
-					return false
+				if err := value("unknown", child); err != nil {
+					return err
 				}
 			}
 		default:
-			return false
+			return &decodeFault{}
 		}
 		end, e := dec.Token()
-		return e == nil && ((delim == '{' && end == json.Delim('}')) || (delim == '[' && end == json.Delim(']')))
+		if e != nil || !((delim == '{' && end == json.Delim('}')) || (delim == '[' && end == json.Delim(']'))) {
+			return &decodeFault{}
+		}
+		return nil
 	}
-	if !value() {
-		return false
+	if err := value(object, object); err != nil {
+		return err
 	}
-	_, err := dec.Token()
-	return err == io.EOF
+	if _, err := dec.Token(); err != io.EOF {
+		return &decodeFault{}
+	}
+	return nil
 }
