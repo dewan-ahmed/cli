@@ -429,16 +429,18 @@ func pipeline(r *resource, dest Location, operation string, ref referenceFn) err
 		if err := rewriteScalars(cb, ref, "repoName"); err != nil {
 			return err
 		}
-		b := obj(cb["build"])
-		if only(b, "type", "spec") != nil || str(b, "type") != "branch" {
-			return safeCode("pipeline_codebase")
-		}
-		s := obj(b["spec"])
-		if only(s, "branch") != nil {
-			return safeCode("pipeline_codebase")
-		}
-		if err := rewriteScalars(s, ref, "branch"); err != nil {
-			return err
+		if str(cb, "build") != "<+input>" {
+			b := obj(cb["build"])
+			if only(b, "type", "spec") != nil || str(b, "type") != "branch" {
+				return safeCode("pipeline_codebase")
+			}
+			s := obj(b["spec"])
+			if only(s, "branch") != nil {
+				return safeCode("pipeline_codebase")
+			}
+			if err := rewriteScalars(s, ref, "branch"); err != nil {
+				return err
+			}
 		}
 	}
 	stages, ok := p["stages"].([]any)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"reflect"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
@@ -156,6 +157,71 @@ func TestOrdinaryRuntimeInputsRetainedInSerializedScalars(t *testing.T) {
 		}
 	}
 }
+func TestCodebaseBuildFormsRetainedInSerializedCopy(t *testing.T) {
+	for _, name := range []string{"runtime", "branch"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			o := options(t)
+			cb := fields(f.source["pipeline:build"]).codebase
+			if name == "runtime" {
+				cb["build"] = "<+input>"
+			}
+			want := copyMap(cb)
+			report, err := engine(f).Run(o)
+			if err != nil || !report.RequestedComplete {
+				t.Fatal("supported codebase build rejected")
+			}
+			if !reflect.DeepEqual(sentPipeline(t, f).codebase, want) || !reflect.DeepEqual(cb, want) {
+				t.Fatal("codebase changed during copy or source was mutated")
+			}
+			assertNoLeak(t, report)
+		})
+	}
+}
+
+func TestRuntimeCodebaseBuildDoesNotBypassPreflight(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(map[string]any)
+	}{
+		{"unresolved-connector", func(cb map[string]any) { cb["connectorRef"] = "missing" }},
+		{"wrong-type-connector", func(cb map[string]any) { cb["connectorRef"] = "account.cluster" }},
+		{"dynamic-connector", func(cb map[string]any) { cb["connectorRef"] = "<+input>" }},
+		{"repository-object", func(cb map[string]any) { cb["repoName"] = map[string]any{"name": "synthetic"} }},
+		{"repository-dependency", func(cb map[string]any) { cb["repoName"] = "<+variable.repository>" }},
+		{"build-default", func(cb map[string]any) { cb["build"] = "<+input>.default(main)" }},
+		{"build-parameterized", func(cb map[string]any) { cb["build"] = "<+input>.selectOneFrom(main,release)" }},
+		{"build-interpolated", func(cb map[string]any) { cb["build"] = "prefix<+input>suffix" }},
+		{"build-expression", func(cb map[string]any) { cb["build"] = "<+pipeline.variables.build>" }},
+		{"build-whitespace", func(cb map[string]any) { cb["build"] = " <+input> " }},
+		{"build-missing", func(cb map[string]any) { delete(cb, "build") }},
+		{"build-null", func(cb map[string]any) { cb["build"] = nil }},
+		{"build-boolean", func(cb map[string]any) { cb["build"] = false }},
+		{"build-tag", func(cb map[string]any) {
+			cb["build"] = map[string]any{"type": "tag", "spec": map[string]any{"tag": "synthetic"}}
+		}},
+		{"build-extra-field", func(cb map[string]any) {
+			cb["build"] = map[string]any{"type": "branch", "spec": map[string]any{"branch": "<+input>"}, "unknown": true}
+		}},
+		{"branch-extra-field", func(cb map[string]any) {
+			cb["build"] = map[string]any{"type": "branch", "spec": map[string]any{"branch": "<+input>", "unknown": true}}
+		}},
+		{"codebase-depth", func(cb map[string]any) { cb["depth"] = 0 }},
+		{"codebase-ssl-verify", func(cb map[string]any) { cb["sslVerify"] = true }},
+		{"codebase-pr-strategy", func(cb map[string]any) { cb["prCloneStrategy"] = "MergeCommit" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			o := options(t)
+			cb := fields(f.source["pipeline:build"]).codebase
+			cb["build"] = "<+input>"
+			tc.set(cb)
+			assertPreflightBlocked(t, f, o)
+		})
+	}
+}
+
 func TestSharedSecretScalarRewritesReachFinalSerializedRequest(t *testing.T) {
 	f := newFixture(t)
 	o := options(t)
