@@ -119,6 +119,21 @@ func (t *Transport) read(ctx context.Context, scope Scope, id string, page int, 
 	return errors.New("secret inventory retries exhausted")
 }
 
+func canonicalObject(data []byte, controls ...string) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if !unambiguousJSON(data) || json.Unmarshal(data, &fields) != nil || fields == nil {
+		return nil, errors.New("malformed secret inventory object")
+	}
+	for key, value := range fields {
+		for _, control := range controls {
+			if strings.EqualFold(key, control) && (key != control || string(value) == "null") {
+				return nil, errors.New("ambiguous or null secret inventory control")
+			}
+		}
+	}
+	return fields, nil
+}
+
 func unambiguousJSON(data []byte) bool {
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	var value func() bool
