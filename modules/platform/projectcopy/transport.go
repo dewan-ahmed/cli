@@ -52,7 +52,11 @@ func (t *Transport) exchange(ctx context.Context, method, path string, query url
 	if query != nil {
 		base.RawQuery = query.Encode()
 	}
-	for attempt := 0; attempt < 3; attempt++ {
+	attempts := retryLimit(method, path, body)
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := refreshAuth(t.auth); err != nil {
+			return 0, nil, err
+		}
 		var reader io.Reader
 		if body != "" {
 			reader = strings.NewReader(body)
@@ -71,7 +75,7 @@ func (t *Transport) exchange(ctx context.Context, method, path string, query url
 		}
 		resp, err := t.http.Do(req)
 		if err != nil {
-			if attempt == 2 || ctx.Err() != nil {
+			if attempt == attempts-1 || ctx.Err() != nil {
 				return 0, nil, errors.New("project copy request failed")
 			}
 			if t.wait(ctx, time.Duration(attempt+1)*time.Second) != nil {
@@ -80,7 +84,7 @@ func (t *Transport) exchange(ctx context.Context, method, path string, query url
 			continue
 		}
 		retry := resp.StatusCode == 429 || resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504
-		if retry && attempt < 2 {
+		if retry && attempt < attempts-1 {
 			delay := time.Duration(attempt+1) * time.Second
 			if raw := resp.Header.Get("Retry-After"); raw != "" {
 				if seconds, e := strconv.Atoi(raw); e == nil && seconds >= 0 {
@@ -135,6 +139,9 @@ func (t *Transport) read(ctx context.Context, scope Scope, id string, page int, 
 	}
 	base.RawQuery = q.Encode()
 	for attempt := 0; attempt < 3; attempt++ {
+		if err := refreshAuth(t.auth); err != nil {
+			return err
+		}
 		req, err := http.NewRequestWithContext(ctx, method, base.String(), strings.NewReader(body))
 		if err != nil {
 			return errors.New("cannot prepare secret inventory request")
@@ -190,6 +197,33 @@ func (t *Transport) read(ctx context.Context, scope Scope, id string, page int, 
 		return nil
 	}
 	return errors.New("secret inventory retries exhausted")
+}
+
+func refreshAuth(a *auth.ResolvedAuth) error {
+	if a == nil {
+		return errors.New("project copy authentication required")
+	}
+	if err := auth.CheckAndUpdateAccessToken(a, time.Now()); err != nil {
+		return errors.New("project copy authentication expired")
+	}
+	return nil
+}
+
+func retryLimit(method, path, body string) int {
+	if method == http.MethodGet || method == http.MethodHead {
+		return 3
+	}
+	if method == http.MethodPost && isReadPost(path, body) {
+		return 3
+	}
+	return 1
+}
+
+func isReadPost(path, body string) bool {
+	if strings.Contains(path, "/list") || strings.HasSuffix(path, "/listDelegates") {
+		return true
+	}
+	return strings.Contains(body, `"filterType"`)
 }
 
 func canonicalObject(data []byte, controls ...string) (map[string]json.RawMessage, error) {

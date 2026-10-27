@@ -49,6 +49,7 @@ type copier struct {
 	plans       []work
 	conflict    bool
 	blocked     bool
+	skipped     bool
 	envIDs      []string
 	pipelineIDs []string
 }
@@ -120,6 +121,10 @@ func (c *copier) run() error {
 			c.report.Readiness = "plan incomplete: blocked resources will be skipped on apply"
 			return errors.New("project copy plan incomplete: blocked resources were not included")
 		}
+		if c.skipped {
+			c.report.Readiness = "plan incomplete: requested git-backed resources will be skipped on apply"
+			return errors.New("project copy plan incomplete: requested git-backed resources were not included")
+		}
 		c.report.Readiness = "plan only; pass --apply to copy"
 		return nil
 	}
@@ -140,6 +145,13 @@ func (c *copier) run() error {
 	if c.blocked {
 		c.report.Readiness = "copied with blocked resources skipped"
 		return errors.New("project copy incomplete: blocked resources were not copied")
+	}
+	if c.skipped {
+		c.report.Readiness = "copied with requested resources skipped"
+		if len(c.report.SecretsPendingValue) > 0 {
+			c.report.Readiness = "copied with requested resources skipped; update inline secrets before running the destination project"
+		}
+		return errors.New("project copy incomplete: requested git-backed resources were not copied")
 	}
 	c.report.Readiness = "copied"
 	if len(c.report.SecretsPendingValue) > 0 {
@@ -275,7 +287,13 @@ func secretMetaMatches(want, got map[string]any) bool {
 	if gotSpec == nil || stringField(gotSpec, "valueType") != stringField(wantSpec, "valueType") {
 		return false
 	}
-	return stringField(gotSpec, "secretManagerIdentifier") == stringField(wantSpec, "secretManagerIdentifier")
+	if stringField(gotSpec, "secretManagerIdentifier") != stringField(wantSpec, "secretManagerIdentifier") {
+		return false
+	}
+	if strings.EqualFold(stringField(wantSpec, "valueType"), "Reference") {
+		return stringField(gotSpec, "value") == stringField(wantSpec, "value")
+	}
+	return true
 }
 
 func specObject(spec map[string]json.RawMessage, inline bool) (map[string]any, error) {
@@ -308,7 +326,7 @@ func (c *copier) planConnectors() error {
 			continue
 		}
 		if isRemote(item) {
-			c.keep(Result{Kind: "connector", Identifier: id, Action: ActionSkipped, Reason: "git-backed connector skipped"})
+			c.skipGit("connector", id, "git-backed connector skipped")
 			continue
 		}
 		if id == "harnessSecretManager" || truthy(item["harnessManaged"]) {
@@ -364,7 +382,7 @@ func (c *copier) planYAMLList(kind, path, root, parent string, extra url.Values)
 			continue
 		}
 		if isRemote(item) {
-			c.keep(Result{Kind: kind, Identifier: id, Action: ActionSkipped, Reason: "git-backed resource skipped"})
+			c.skipGit(kind, id, "git-backed resource skipped")
 			continue
 		}
 		sourceDoc, err := c.yamlFor(kind, id, item, root, extra, c.scope.Source)
@@ -520,7 +538,7 @@ func (c *copier) planOverrides(env string) error {
 			id = env + "/" + stringField(item, "serviceRef", "serviceIdentifier")
 		}
 		if isRemote(item) {
-			c.keep(Result{Kind: "service_override", Identifier: id, Action: ActionSkipped, Reason: "git-backed resource skipped"})
+			c.skipGit("service_override", id, "git-backed resource skipped")
 			continue
 		}
 		source := cleanRoot(item)
@@ -550,23 +568,23 @@ func (c *copier) planOverrides(env string) error {
 	return nil
 }
 
+type templateUnit struct {
+	id, version, reportID, doc string
+	stable                     bool
+}
+
 func (c *copier) planTemplates() error {
 	items, err := c.list(http.MethodPost, "/template/api/templates/list", mergeQuery(c.query(c.scope.Source), url.Values{"templateListType": {"ALL"}}), `{"filterType":"Template"}`, "page", "size", "")
 	if err != nil {
 		return err
 	}
-	sort.Slice(items, func(i, j int) bool {
-		if stringField(items[i], "identifier") != stringField(items[j], "identifier") {
-			return stringField(items[i], "identifier") < stringField(items[j], "identifier")
-		}
-		return versionLess(stringField(items[i], "versionLabel", "version"), stringField(items[j], "versionLabel", "version"))
-	})
+	var units []templateUnit
 	for _, item := range items {
 		id := stringField(item, "identifier")
 		version := stringField(item, "versionLabel", "version")
 		reportID := id + "/" + version
 		if isRemote(item) {
-			c.keep(Result{Kind: "template", Identifier: reportID, Action: ActionSkipped, Reason: "git-backed template skipped"})
+			c.skipGit("template", reportID, "git-backed template skipped")
 			continue
 		}
 		query := mergeQuery(c.query(c.scope.Source), url.Values{"versionLabel": {version}})
@@ -588,8 +606,14 @@ func (c *copier) planTemplates() error {
 			c.block("template", reportID, "template definition missing")
 			continue
 		}
-		c.observeDoc(rewritten)
-		destObj, destFound, err := c.getObject("/template/api/templates/"+url.PathEscape(id), mergeQuery(c.query(c.scope.Destination), url.Values{"versionLabel": {version}}))
+		units = append(units, templateUnit{
+			id: id, version: version, reportID: reportID, doc: rewritten,
+			stable: truthy(item["stableTemplate"]) || truthy(item["stable"]),
+		})
+	}
+	for _, unit := range orderTemplateUnits(units) {
+		c.observeDoc(unit.doc)
+		destObj, destFound, err := c.getObject("/template/api/templates/"+url.PathEscape(unit.id), mergeQuery(c.query(c.scope.Destination), url.Values{"versionLabel": {unit.version}}))
 		if err != nil {
 			return err
 		}
@@ -597,16 +621,16 @@ func (c *copier) planTemplates() error {
 			destData, _ := digMap(destObj, "data")
 			destDoc := stringField(destData, "yaml")
 			destRewritten, rerr := c.rewriteDoc(destDoc, false)
-			if rerr != nil || !sameDocument(rewritten, destRewritten) {
-				c.conflictResult("template", reportID)
+			if rerr != nil || !sameDocument(unit.doc, destRewritten) {
+				c.conflictResult("template", unit.reportID)
 				continue
 			}
-			c.keep(Result{Kind: "template", Identifier: reportID, Action: ActionSkip, Reason: "destination matches"})
+			c.keep(Result{Kind: "template", Identifier: unit.reportID, Action: ActionSkip, Reason: "destination matches"})
 			continue
 		}
-		stable := truthy(item["stableTemplate"]) || truthy(item["stable"])
-		docCopy := rewritten
-		c.queue(Result{Kind: "template", Identifier: reportID, Action: ActionCreate}, func() error {
+		docCopy := unit.doc
+		id, version, stable := unit.id, unit.version, unit.stable
+		c.queue(Result{Kind: "template", Identifier: unit.reportID, Action: ActionCreate}, func() error {
 			if err := c.postYAML("/template/api/templates", c.query(c.scope.Destination), docCopy); err != nil {
 				return err
 			}
@@ -614,12 +638,105 @@ func (c *copier) planTemplates() error {
 				return nil
 			}
 			stablePath := "/template/api/templates/updateStableTemplate/" + url.PathEscape(id) + "/" + url.PathEscape(version)
-			// The version is already stored. A rejected stable-label call does not roll that back.
-			_ = c.postJSON(stablePath, c.query(c.scope.Destination), "")
-			return nil
+			return c.postJSON(stablePath, c.query(c.scope.Destination), "")
 		})
 	}
 	return nil
+}
+
+func orderTemplateUnits(units []templateUnit) []templateUnit {
+	if len(units) < 2 {
+		return units
+	}
+	ids := map[string]struct{}{}
+	byID := map[string][]templateUnit{}
+	for _, unit := range units {
+		ids[unit.id] = struct{}{}
+		byID[unit.id] = append(byID[unit.id], unit)
+	}
+	for id := range byID {
+		sort.Slice(byID[id], func(i, j int) bool {
+			return versionLess(byID[id][i].version, byID[id][j].version)
+		})
+	}
+	prereq := map[string]map[string]struct{}{}
+	for _, unit := range units {
+		for _, ref := range templateRefs(unit.doc) {
+			dep, ok := projectTemplateID(ref)
+			if !ok || dep == unit.id {
+				continue
+			}
+			if _, known := ids[dep]; !known {
+				continue
+			}
+			if prereq[unit.id] == nil {
+				prereq[unit.id] = map[string]struct{}{}
+			}
+			prereq[unit.id][dep] = struct{}{}
+		}
+	}
+	remaining := map[string]struct{}{}
+	for id := range ids {
+		remaining[id] = struct{}{}
+	}
+	var orderedIDs []string
+	for len(remaining) > 0 {
+		var ready []string
+		for id := range remaining {
+			blocked := false
+			for dep := range prereq[id] {
+				if _, still := remaining[dep]; still {
+					blocked = true
+					break
+				}
+			}
+			if !blocked {
+				ready = append(ready, id)
+			}
+		}
+		if len(ready) == 0 {
+			for id := range remaining {
+				ready = append(ready, id)
+			}
+			sort.Strings(ready)
+			orderedIDs = append(orderedIDs, ready...)
+			break
+		}
+		sort.Strings(ready)
+		for _, id := range ready {
+			orderedIDs = append(orderedIDs, id)
+			delete(remaining, id)
+		}
+	}
+	out := make([]templateUnit, 0, len(units))
+	for _, id := range orderedIDs {
+		out = append(out, byID[id]...)
+	}
+	return out
+}
+
+func templateRefs(doc string) []string {
+	var node any
+	if yaml.Unmarshal([]byte(doc), &node) != nil {
+		return nil
+	}
+	var refs []string
+	walk(yamlToPlain(node), func(key string, value any) {
+		s, ok := value.(string)
+		if key != "templateRef" || !ok || s == "" {
+			return
+		}
+		refs = append(refs, s)
+	})
+	return refs
+}
+
+func projectTemplateID(ref string) (string, bool) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || strings.Contains(ref, ".") {
+		return "", false
+	}
+	return ref, true
 }
 
 func (c *copier) planPipelines() error {
@@ -630,7 +747,7 @@ func (c *copier) planPipelines() error {
 	for _, item := range items {
 		id := stringField(item, "identifier")
 		if isRemote(item) {
-			c.keep(Result{Kind: "pipeline", Identifier: id, Action: ActionSkipped, Reason: "git-backed pipeline skipped"})
+			c.skipGit("pipeline", id, "git-backed pipeline skipped")
 			continue
 		}
 		doc, found, err := c.pipelineYAML(id, c.scope.Source)
@@ -706,7 +823,7 @@ func (c *copier) planPipelineDocs(kind, pipeline, path, yamlKey string, disable 
 		id := stringField(item, "identifier")
 		reportID := pipeline + "/" + id
 		if isRemote(item) {
-			c.keep(Result{Kind: kind, Identifier: reportID, Action: ActionSkipped, Reason: "git-backed resource skipped"})
+			c.skipGit(kind, reportID, "git-backed resource skipped")
 			continue
 		}
 		doc := stringField(item, yamlKey, "yaml", "inputSetYaml")
@@ -867,7 +984,17 @@ func (c *copier) planDelegates() error {
 }
 
 func delegateConnected(item map[string]any) bool {
-	return strings.Contains(strings.ToLower(stringField(item, "connectivityStatus", "status")), "connected")
+	status := strings.ToUpper(strings.TrimSpace(stringField(item, "connectivityStatus", "status")))
+	switch status {
+	case "DISCONNECTED", "DOWN", "EXPIRED", "DEAD":
+		return false
+	case "CONNECTED", "ACTIVE", "SUCCESS":
+		return true
+	}
+	if b, ok := item["activelyConnected"].(bool); ok {
+		return b
+	}
+	return strings.EqualFold(strings.TrimSpace(stringField(item, "activelyConnected")), "true")
 }
 
 func delegateMatches(item map[string]any, selector string) bool {
@@ -930,6 +1057,11 @@ func (c *copier) queue(result Result, write func() error) {
 
 func (c *copier) keep(result Result) {
 	c.report.Results = append(c.report.Results, result)
+}
+
+func (c *copier) skipGit(kind, id, reason string) {
+	c.skipped = true
+	c.keep(Result{Kind: kind, Identifier: id, Action: ActionSkipped, Reason: reason})
 }
 
 func (c *copier) block(kind, id, reason string) {
@@ -1275,8 +1407,18 @@ func isNotFound(status int, body []byte) bool {
 	if status == http.StatusNotFound {
 		return true
 	}
-	text := strings.ToUpper(string(body))
-	return strings.Contains(text, "NOT_FOUND") || strings.Contains(text, "DOES NOT EXIST") || strings.Contains(text, "NOT FOUND")
+	var envelope struct {
+		Status string `json:"status"`
+		Code   string `json:"code"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return false
+	}
+	if strings.EqualFold(envelope.Status, "SUCCESS") {
+		return false
+	}
+	code := strings.ToUpper(strings.TrimSpace(envelope.Code))
+	return code == "ENTITY_NOT_FOUND" || code == "RESOURCE_NOT_FOUND_EXCEPTION" || strings.HasSuffix(code, "_NOT_FOUND")
 }
 
 func intFrom(v any) int {

@@ -24,13 +24,15 @@ The first command is a plan. Nothing is written. `--apply` creates the destinati
 Order: project, secrets, connectors, services, environments, infrastructures, service overrides, templates, pipelines, input sets, triggers, policies, policy sets.
 
 - Inline `SecretText` is created with the placeholder value `123456`. The source value is not read. Update each listed secret before running the destination project.
-- Reference secrets copy the secret manager and reference path.
+- Reference secrets copy the secret manager and reference path. A destination secret with a different path is a conflict.
 - Other secret types are reported as blocked and skipped.
+- Templates are copied in dependency order using project-scoped `templateRef` values.
 - Triggers are created disabled.
-- Git-backed entities are skipped.
+- Git-backed entities are skipped and the command exits nonzero so the skip is not treated as a complete copy.
 - Org and account references, including `account.` and `org.` identifiers, are reported and left in place.
-- Delegate selectors are checked against connected delegates. Delegates themselves are not installed.
+- Delegate selectors are checked against connected delegates (`CONNECTED`). Delegates themselves are not installed.
 - Identical destination resources are skipped. A same identifier with different content aborts the copy before any write.
+- A create failure stops the copy. Re-run `--apply` to continue; matching resources already written are skipped.
 
 ## Test against a source project
 
